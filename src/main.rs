@@ -146,12 +146,15 @@ fn main() -> anyhow::Result<()> {
             hasher.update(&meta_encoded);
             let hash = hasher.finalize();
 
-            println!(
-                "Tracker URL: {}\nLength: {}\nInfo Hash: {}",
-                meta.announce,
-                meta.info.length,
-                hex::encode(hash)
-            );
+            println!("Tracker URL: {}", meta.announce,);
+            println!("Length: {}", meta.info.length);
+            println!("Info Hash: {}", hex::encode(hash));
+            println!("Piece Length: {}", meta.info.piece_length);
+            println!("Piece Hashes:");
+
+            for hash in meta.info.pieces.chunks_exact(20) {
+                println!("{}", hex::encode(hash));
+            }
         }
     }
 
