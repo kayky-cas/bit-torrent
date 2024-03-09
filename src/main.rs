@@ -1,4 +1,3 @@
-use serde_json;
 use std::env;
 
 // Available if you need it!
@@ -7,13 +6,26 @@ use std::env;
 #[allow(dead_code)]
 fn decode_bencoded_value(encoded_value: &str) -> serde_json::Value {
     // If encoded_value starts with a digit, it's a number
-    if encoded_value.chars().next().unwrap().is_digit(10) {
+
+    let first_char = encoded_value.chars().next().unwrap();
+
+    if first_char.is_ascii_digit() {
         // Example: "5:hello" -> "hello"
         let colon_index = encoded_value.find(':').unwrap();
         let number_string = &encoded_value[..colon_index];
         let number = number_string.parse::<i64>().unwrap();
         let string = &encoded_value[colon_index + 1..colon_index + 1 + number as usize];
-        return serde_json::Value::String(string.to_string());
+        serde_json::Value::String(string.to_string())
+    } else if first_char == 'i' {
+        let decimal_size: usize = encoded_value[1..]
+            .chars()
+            .take_while(|&ch| ch != 'e')
+            .count();
+
+        let offset = 1 + decimal_size;
+        let num: i64 = encoded_value[1..offset].parse().unwrap();
+
+        serde_json::Value::Number(num.into())
     } else {
         panic!("Unhandled encoded value: {}", encoded_value)
     }
@@ -27,7 +39,7 @@ fn main() {
     if command == "decode" {
         let encoded_value = &args[2];
         let decoded_value = decode_bencoded_value(encoded_value);
-        println!("{}", decoded_value.to_string());
+        println!("{}", decoded_value);
     } else {
         println!("unknown command: {}", args[1])
     }
