@@ -1,14 +1,16 @@
 use std::{
-    fs::File,
+    fs::read,
     io::{BufRead, BufReader},
     path::PathBuf,
 };
 
 use anyhow::Context;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
+use serde_bytes::ByteBuf;
 use serde_json::Map;
 
 use clap::{Parser, Subcommand};
+use sha1::{Digest, Sha1};
 
 /// Simple program to greet a person
 #[derive(Parser, Debug)]
@@ -103,22 +105,22 @@ fn decode_bencoded_value(reader: &mut dyn BufRead) -> anyhow::Result<serde_json:
     })
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Serialize)]
 struct MetaFile {
     announce: String,
     info: MetaFileInfo,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Serialize)]
 struct MetaFileInfo {
     length: usize,
     #[allow(dead_code)]
     name: String,
-    #[serde(rename(deserialize = "piece length"))]
+    #[serde(rename = "piece length")]
     #[allow(dead_code)]
     piece_length: usize,
     #[allow(dead_code)]
-    pieces: Vec<u8>,
+    pieces: ByteBuf,
 }
 
 // Usage: your_bittorrent.sh decode "<encoded_value>"
@@ -133,19 +135,22 @@ fn main() -> anyhow::Result<()> {
             println!("{}", decoded_value);
         }
         Commands::Info { file_path } => {
-            let file = File::open(&file_path)
+            let content = read(&file_path)
                 .with_context(|| format!("file {} does not exists", file_path.display()))?;
 
-            let mut reader = BufReader::new(file);
+            let meta: MetaFile =
+                serde_bencode::from_bytes(&content).context("not a valid meta file")?;
+            let meta_encoded = serde_bencode::to_bytes(&meta.info).context("encode meta info")?;
 
-            let object = decode_bencoded_value(&mut reader)
-                .with_context(|| format!("was not possible to decode: {}", file_path.display()))?;
-
-            let meta: MetaFile = serde_json::from_value(object).context("not a valid meta file")?;
+            let mut hasher = Sha1::new();
+            hasher.update(&meta_encoded);
+            let hash = hasher.finalize();
 
             println!(
-                "Tracker URL: {}\nLength: {}",
-                meta.announce, meta.info.length,
+                "Tracker URL: {}\nLength: {}\nInfo Hash: {}",
+                meta.announce,
+                meta.info.length,
+                hex::encode(hash)
             );
         }
     }
