@@ -1,10 +1,28 @@
 use std::{
-    env,
+    fs::File,
     io::{BufRead, BufReader},
+    path::PathBuf,
 };
 
 use anyhow::Context;
+use serde::Deserialize;
 use serde_json::Map;
+
+use clap::{Parser, Subcommand};
+
+/// Simple program to greet a person
+#[derive(Parser, Debug)]
+#[command(version, about, long_about = None)]
+struct Args {
+    #[command(subcommand)]
+    command: Commands,
+}
+
+#[derive(Subcommand, Debug)]
+enum Commands {
+    Decode { encoded_value: String },
+    Info { file_path: PathBuf },
+}
 
 // Available if you need it!
 // use serde_bencode
@@ -37,8 +55,15 @@ fn decode_bencoded_value(reader: &mut dyn BufRead) -> anyhow::Result<serde_json:
                 .read_exact(buf)
                 .context("not possible to read the string")?;
 
-            let text = std::str::from_utf8(buf).context("the size is not a valid UTF-8")?;
-            serde_json::Value::String(text.to_string())
+            if let Ok(text) = std::str::from_utf8(buf) {
+                serde_json::Value::String(text.to_string())
+            } else {
+                serde_json::Value::Array(
+                    buf.iter()
+                        .map(|&x| serde_json::Value::Number(x.into()))
+                        .collect(),
+                )
+            }
         }
         b'i' => {
             let mut buf = Vec::new();
@@ -78,19 +103,51 @@ fn decode_bencoded_value(reader: &mut dyn BufRead) -> anyhow::Result<serde_json:
     })
 }
 
+#[derive(Deserialize)]
+struct MetaFile {
+    announce: String,
+    info: MetaFileInfo,
+}
+
+#[derive(Deserialize)]
+struct MetaFileInfo {
+    length: usize,
+    #[allow(dead_code)]
+    name: String,
+    #[serde(rename(deserialize = "piece length"))]
+    #[allow(dead_code)]
+    piece_length: usize,
+    #[allow(dead_code)]
+    pieces: Vec<u8>,
+}
+
 // Usage: your_bittorrent.sh decode "<encoded_value>"
 fn main() -> anyhow::Result<()> {
-    let args: Vec<String> = env::args().collect();
-    let command = &args[1];
+    let args = Args::parse();
 
-    if command == "decode" {
-        let encoded_value = &args[2];
-        let mut reader = BufReader::new(encoded_value.as_bytes());
-        let decoded_value = decode_bencoded_value(&mut reader)
-            .with_context(|| format!("was not possible to decode: {}", encoded_value))?;
-        println!("{}", decoded_value);
-    } else {
-        println!("unknown command: {}", args[1])
+    match args.command {
+        Commands::Decode { encoded_value } => {
+            let mut reader = BufReader::new(encoded_value.as_bytes());
+            let decoded_value = decode_bencoded_value(&mut reader)
+                .with_context(|| format!("was not possible to decode: {}", encoded_value))?;
+            println!("{}", decoded_value);
+        }
+        Commands::Info { file_path } => {
+            let file = File::open(&file_path)
+                .with_context(|| format!("file {} does not exists", file_path.display()))?;
+
+            let mut reader = BufReader::new(file);
+
+            let object = decode_bencoded_value(&mut reader)
+                .with_context(|| format!("was not possible to decode: {}", file_path.display()))?;
+
+            let meta: MetaFile = serde_json::from_value(object).context("not a valid meta file")?;
+
+            println!(
+                "Tracker URL: {}\nLength: {}",
+                meta.announce, meta.info.length,
+            );
+        }
     }
 
     Ok(())
