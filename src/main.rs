@@ -4,6 +4,7 @@ use std::{
 };
 
 use anyhow::Context;
+use serde_json::Map;
 
 // Available if you need it!
 // use serde_bencode
@@ -61,6 +62,15 @@ fn decode_bencoded_value(reader: &mut dyn BufRead) -> anyhow::Result<serde_json:
             }
 
             list.into()
+        }
+        b'd' => {
+            let mut list: Map<String, serde_json::Value> = Map::new();
+
+            while let Ok(serde_json::Value::String(value)) = decode_bencoded_value(reader) {
+                list.insert(value, decode_bencoded_value(reader)?);
+            }
+
+            serde_json::Value::Object(list)
         }
         _ => {
             anyhow::bail!("This is not a valid bencode value")
