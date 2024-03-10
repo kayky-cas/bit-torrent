@@ -137,13 +137,7 @@ struct Tracker {
 
 #[derive(Deserialize)]
 struct TrackerResponse {
-    peers: Vec<Peer>,
-}
-
-#[derive(Deserialize)]
-struct Peer {
-    port: u16,
-    ip: String,
+    peers: ByteBuf,
 }
 
 // Usage: your_bittorrent.sh decode "<encoded_value>"
@@ -200,7 +194,7 @@ async fn main() -> anyhow::Result<()> {
                     uploaded: 0,
                     downloaded: 0,
                     left: meta.info.length,
-                    compact: 0,
+                    compact: 1,
                 }
             };
 
@@ -221,8 +215,9 @@ async fn main() -> anyhow::Result<()> {
             let response: TrackerResponse =
                 serde_bencode::from_bytes(&response).context("faild to parse the response")?;
 
-            for peer in response.peers {
-                println!("{}:{}", peer.ip, peer.port);
+            for peer in response.peers.chunks_exact(6) {
+                let port = u16::from_be_bytes([peer[4], peer[5]]);
+                println!("{}.{}.{}.{}:{}", peer[0], peer[1], peer[2], peer[3], port);
             }
         }
     };
