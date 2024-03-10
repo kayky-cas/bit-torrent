@@ -24,6 +24,7 @@ struct Args {
 enum Commands {
     Decode { encoded_value: String },
     Info { file_path: PathBuf },
+    Peers { file_path: PathBuf },
 }
 
 // Available if you need it!
@@ -123,8 +124,33 @@ struct MetaFileInfo {
     pieces: ByteBuf,
 }
 
+#[derive(Serialize)]
+struct Tracker {
+    info_hash: String,
+    peer_id: String,
+    port: u16,
+    uploaded: usize,
+    downloaded: usize,
+    left: usize,
+    compact: usize,
+}
+
+#[derive(Deserialize)]
+struct TrackerResponse {
+    #[allow(dead_code)]
+    interval: u32,
+    peers: Vec<Peer>,
+}
+
+#[derive(Deserialize)]
+struct Peer {
+    port: u16,
+    ip: String,
+}
+
 // Usage: your_bittorrent.sh decode "<encoded_value>"
-fn main() -> anyhow::Result<()> {
+#[tokio::main]
+async fn main() -> anyhow::Result<()> {
     let args = Args::parse();
 
     match args.command {
@@ -156,7 +182,52 @@ fn main() -> anyhow::Result<()> {
                 println!("{}", hex::encode(hash));
             }
         }
-    }
+        Commands::Peers { file_path } => {
+            let content = read(&file_path)
+                .with_context(|| format!("file {} does not exists", file_path.display()))?;
+
+            let meta: MetaFile =
+                serde_bencode::from_bytes(&content).context("not a valid meta file")?;
+            let meta_encoded = serde_bencode::to_bytes(&meta.info).context("encode meta info")?;
+
+            let mut hasher = Sha1::new();
+            hasher.update(&meta_encoded);
+            let hash = hasher.finalize().to_vec();
+
+            let tracker = unsafe {
+                Tracker {
+                    info_hash: String::from_utf8_unchecked(hash),
+                    peer_id: "00112233445566778899".to_owned(),
+                    port: 6881,
+                    uploaded: 0,
+                    downloaded: 0,
+                    left: meta.info.length,
+                    compact: 0,
+                }
+            };
+
+            let client = reqwest::Client::new();
+
+            let response = client
+                .get(meta.announce)
+                .query(&tracker)
+                .send()
+                .await
+                .context("failed to do the request")?;
+
+            let response = response
+                .bytes()
+                .await
+                .context("faild to parse the response")?;
+
+            let response: TrackerResponse =
+                serde_bencode::from_bytes(&response).context("faild to parse the response")?;
+
+            for peer in response.peers {
+                println!("{}:{}", peer.ip, peer.port);
+            }
+        }
+    };
 
     Ok(())
 }
