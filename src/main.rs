@@ -137,8 +137,6 @@ struct Tracker {
 
 #[derive(Deserialize)]
 struct TrackerResponse {
-    #[allow(dead_code)]
-    interval: u32,
     peers: Vec<Peer>,
 }
 
