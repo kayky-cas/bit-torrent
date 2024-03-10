@@ -1,6 +1,6 @@
 use std::{
     fs::read,
-    io::{BufRead, BufReader},
+    io::{BufRead, BufReader, BufWriter, Write},
     path::PathBuf,
 };
 
@@ -11,6 +11,10 @@ use serde_json::Map;
 
 use clap::{Parser, Subcommand};
 use sha1::{Digest, Sha1};
+use tokio::{
+    io::{AsyncReadExt, AsyncWriteExt},
+    net::TcpStream,
+};
 
 /// Simple program to greet a person
 #[derive(Parser, Debug)]
@@ -25,6 +29,7 @@ enum Commands {
     Decode { encoded_value: String },
     Info { file_path: PathBuf },
     Peers { file_path: PathBuf },
+    Handshake { file_path: PathBuf, ip_addr: String },
 }
 
 // Available if you need it!
@@ -219,6 +224,60 @@ async fn main() -> anyhow::Result<()> {
                 let port = u16::from_be_bytes([peer[4], peer[5]]);
                 println!("{}.{}.{}.{}:{}", peer[0], peer[1], peer[2], peer[3], port);
             }
+        }
+        Commands::Handshake { file_path, ip_addr } => {
+            let mut client = TcpStream::connect(ip_addr)
+                .await
+                .context("not possible to connect")?;
+
+            let mut buf = [0u8; 68];
+            let mut writer = BufWriter::new(&mut buf[..]);
+
+            writer
+                .write(&[19])
+                .context("not possible to write the buffer")?;
+            writer
+                .write(b"BitTorrent protocol")
+                .context("not possible to write the buffer")?;
+
+            let content = read(&file_path)
+                .with_context(|| format!("file {} does not exists", file_path.display()))?;
+
+            let meta: MetaFile =
+                serde_bencode::from_bytes(&content).context("not a valid meta file")?;
+            let meta_encoded = serde_bencode::to_bytes(&meta.info).context("encode meta info")?;
+
+            let mut hasher = Sha1::new();
+            hasher.update(&meta_encoded);
+            let hash = hasher.finalize().to_vec();
+
+            writer
+                .write(&[0u8; 8])
+                .context("not possible to write the buffer")?;
+
+            writer
+                .write(&hash)
+                .context("not possible to write the buffer")?;
+
+            writer
+                .write(b"00112233445566778899")
+                .context("not possible to write the buffer")?;
+
+            drop(writer);
+
+            client
+                .write_all(&buf[..])
+                .await
+                .context("not possible to send the protocol")?;
+
+            client
+                .read_exact(&mut buf)
+                .await
+                .context("not possible to write the buffer")?;
+
+            let peer_id = hex::encode(&buf[48..]);
+
+            println!("Peer ID: {}", peer_id);
         }
     };
 
