@@ -33,3 +33,4 @@ serde_urlencoded = "0.7.1"                                         # for url enc
 sha1 = "0.10.1"                                                    # hashing
 tempfile = "3"                                                     # creating temporary directories
 tokio = { version = "1.23.0", features = ["full"] }                # async http requests
+urlencoding = "2.1.3"

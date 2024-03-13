@@ -1,20 +1,23 @@
+mod handshake;
+mod message;
+mod torrent_file;
+mod tracker;
+
 use std::{
     fs::read,
-    io::{BufRead, BufReader, BufWriter, Write},
+    io::{BufRead, BufReader},
     path::PathBuf,
 };
 
 use anyhow::Context;
-use serde::{Deserialize, Serialize};
-use serde_bytes::ByteBuf;
-use serde_json::Map;
 
 use clap::{Parser, Subcommand};
-use sha1::{Digest, Sha1};
+use serde_json::Map;
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
-    net::TcpStream,
+    net::{unix::SocketAddr, TcpStream, ToSocketAddrs},
 };
+use tracker::InfoHash;
 
 /// Simple program to greet a person
 #[derive(Parser, Debug)]
@@ -26,18 +29,32 @@ struct Args {
 
 #[derive(Subcommand, Debug)]
 enum Commands {
-    Decode { encoded_value: String },
-    Info { file_path: PathBuf },
-    Peers { file_path: PathBuf },
-    Handshake { file_path: PathBuf, ip_addr: String },
+    Decode {
+        encoded_value: String,
+    },
+    Info {
+        file_path: PathBuf,
+    },
+    Peers {
+        file_path: PathBuf,
+    },
+    Handshake {
+        file_path: PathBuf,
+        ip_addr: String,
+    },
+    #[command(name = "download_piece")]
+    DownloadPiece {
+        #[arg(short)]
+        output_file_path: PathBuf,
+        file_path: PathBuf,
+        piece: usize,
+    },
 }
 
 // Available if you need it!
 // use serde_bencode
 
 fn decode_bencoded_value(reader: &mut dyn BufRead) -> anyhow::Result<serde_json::Value> {
-    // If encoded_value starts with a digit, it's a number
-
     let mut header_buff = [0; 1];
     let _ = reader.read_exact(&mut header_buff);
 
@@ -111,38 +128,60 @@ fn decode_bencoded_value(reader: &mut dyn BufRead) -> anyhow::Result<serde_json:
     })
 }
 
-#[derive(Deserialize, Serialize)]
-struct MetaFile {
-    announce: String,
-    info: MetaFileInfo,
+async fn get_tracker_response(
+    url: &str,
+    tracker: tracker::Tracker,
+) -> anyhow::Result<tracker::TrackerResponse> {
+    let client = reqwest::Client::new();
+
+    let response = client
+        .get(url)
+        .query(&tracker)
+        .send()
+        .await
+        .context("failed to do the request")?;
+
+    let response = response
+        .bytes()
+        .await
+        .context("faild to parse the response")?;
+
+    serde_bencode::from_bytes(&response).context("faild to parse the response")
 }
 
-#[derive(Deserialize, Serialize)]
-struct MetaFileInfo {
-    length: usize,
-    #[allow(dead_code)]
-    name: String,
-    #[serde(rename = "piece length")]
-    #[allow(dead_code)]
-    piece_length: usize,
-    #[allow(dead_code)]
-    pieces: ByteBuf,
-}
+async fn handshake<A: ToSocketAddrs>(
+    ip_addr: A,
+    info_hash: InfoHash,
+) -> anyhow::Result<handshake::Handshake> {
+    let mut client = TcpStream::connect(ip_addr)
+        .await
+        .context("not possible to connect")?;
 
-#[derive(Serialize)]
-struct Tracker {
-    info_hash: String,
-    peer_id: String,
-    port: u16,
-    uploaded: usize,
-    downloaded: usize,
-    left: usize,
-    compact: usize,
-}
+    let handshake = handshake::Handshake {
+        name: String::from("BitTorrent protocol"),
+        info_hash,
+        peer_id: *b"00112233445566778899",
+    };
 
-#[derive(Deserialize)]
-struct TrackerResponse {
-    peers: ByteBuf,
+    let mut handshake_bytes: Vec<u8> = handshake.into();
+
+    client
+        .write_all(&handshake_bytes[..])
+        .await
+        .context("send handshake to client")?;
+
+    let len = handshake_bytes.len();
+
+    client
+        .read_exact(&mut handshake_bytes[..len])
+        .await
+        .context("reading from client")?;
+
+    serde_bytes::serialize(&handshake, serializer);
+
+    handshake_bytes
+        .try_into()
+        .context("converting response into handsheke")
 }
 
 // Usage: your_bittorrent.sh decode "<encoded_value>"
@@ -161,13 +200,10 @@ async fn main() -> anyhow::Result<()> {
             let content = read(&file_path)
                 .with_context(|| format!("file {} does not exists", file_path.display()))?;
 
-            let meta: MetaFile =
+            let meta: torrent_file::TorrentFile =
                 serde_bencode::from_bytes(&content).context("not a valid meta file")?;
-            let meta_encoded = serde_bencode::to_bytes(&meta.info).context("encode meta info")?;
 
-            let mut hasher = Sha1::new();
-            hasher.update(&meta_encoded);
-            let hash = hasher.finalize();
+            let hash = meta.info_hash()?;
 
             println!("Tracker URL: {}", meta.announce,);
             println!("Length: {}", meta.info.length);
@@ -175,7 +211,7 @@ async fn main() -> anyhow::Result<()> {
             println!("Piece Length: {}", meta.info.piece_length);
             println!("Piece Hashes:");
 
-            for hash in meta.info.pieces.chunks_exact(20) {
+            for hash in meta.info.pieces.0 {
                 println!("{}", hex::encode(hash));
             }
         }
@@ -183,17 +219,14 @@ async fn main() -> anyhow::Result<()> {
             let content = read(&file_path)
                 .with_context(|| format!("file {} does not exists", file_path.display()))?;
 
-            let meta: MetaFile =
+            let meta: torrent_file::TorrentFile =
                 serde_bencode::from_bytes(&content).context("not a valid meta file")?;
-            let meta_encoded = serde_bencode::to_bytes(&meta.info).context("encode meta info")?;
 
-            let mut hasher = Sha1::new();
-            hasher.update(&meta_encoded);
-            let hash = hasher.finalize().to_vec();
+            let hash = meta.info_hash()?;
 
-            let tracker = unsafe {
-                Tracker {
-                    info_hash: String::from_utf8_unchecked(hash),
+            let tracker = {
+                tracker::Tracker {
+                    info_hash: hash.into(),
                     peer_id: "00112233445566778899".to_owned(),
                     port: 6881,
                     uploaded: 0,
@@ -203,81 +236,49 @@ async fn main() -> anyhow::Result<()> {
                 }
             };
 
-            let client = reqwest::Client::new();
+            let response = get_tracker_response(&meta.announce, tracker).await?;
 
-            let response = client
-                .get(meta.announce)
-                .query(&tracker)
-                .send()
-                .await
-                .context("failed to do the request")?;
-
-            let response = response
-                .bytes()
-                .await
-                .context("faild to parse the response")?;
-
-            let response: TrackerResponse =
-                serde_bencode::from_bytes(&response).context("faild to parse the response")?;
-
-            for peer in response.peers.chunks_exact(6) {
-                let port = u16::from_be_bytes([peer[4], peer[5]]);
-                println!("{}.{}.{}.{}:{}", peer[0], peer[1], peer[2], peer[3], port);
+            for peer in response.peers.0 {
+                println!("{}", peer);
             }
         }
         Commands::Handshake { file_path, ip_addr } => {
-            let mut client = TcpStream::connect(ip_addr)
-                .await
-                .context("not possible to connect")?;
-
-            let mut buf = [0u8; 68];
-            let mut writer = BufWriter::new(&mut buf[..]);
-
-            writer
-                .write(&[19])
-                .context("not possible to write the buffer")?;
-            writer
-                .write(b"BitTorrent protocol")
-                .context("not possible to write the buffer")?;
-
             let content = read(&file_path)
                 .with_context(|| format!("file {} does not exists", file_path.display()))?;
 
-            let meta: MetaFile =
+            let meta: torrent_file::TorrentFile =
                 serde_bencode::from_bytes(&content).context("not a valid meta file")?;
-            let meta_encoded = serde_bencode::to_bytes(&meta.info).context("encode meta info")?;
 
-            let mut hasher = Sha1::new();
-            hasher.update(&meta_encoded);
-            let hash = hasher.finalize().to_vec();
+            let hash = meta.info_hash()?;
 
-            writer
-                .write(&[0u8; 8])
-                .context("not possible to write the buffer")?;
+            let response_handshake = handshake(ip_addr, hash.into()).await?;
 
-            writer
-                .write(&hash)
-                .context("not possible to write the buffer")?;
+            println!("Peer ID: {}", response_handshake.peer_id_string());
+        }
+        Commands::DownloadPiece {
+            output_file_path: _,
+            file_path,
+            piece: _,
+        } => {
+            let torrent = torrent_file::TorrentFile::try_from(file_path)?;
+            let hash = torrent.info_hash()?;
 
-            writer
-                .write(b"00112233445566778899")
-                .context("not possible to write the buffer")?;
+            let tracker = {
+                tracker::Tracker {
+                    info_hash: hash.into(),
+                    peer_id: "00112233445566778899".to_owned(),
+                    port: 6881,
+                    uploaded: 0,
+                    downloaded: 0,
+                    left: torrent.info.length,
+                    compact: 1,
+                }
+            };
 
-            drop(writer);
+            let response = get_tracker_response(&torrent.announce, tracker).await?;
+            let peer = response.peers.0[0];
 
-            client
-                .write_all(&buf[..])
-                .await
-                .context("not possible to send the protocol")?;
-
-            client
-                .read_exact(&mut buf)
-                .await
-                .context("not possible to write the buffer")?;
-
-            let peer_id = hex::encode(&buf[48..]);
-
-            println!("Peer ID: {}", peer_id);
+            let handshake = handshake(peer, hash.into());
         }
     };
 
